@@ -1,0 +1,113 @@
+name: Deploy Model
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-model-${{ github.ref }}
+  cancel-in-progress: true
+
+### 1.LINT
+  jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+
+      - name: Lint OpenAPI
+        run: |
+          echo "Run OpenAPI lint (tool provided in repo or action)"
+
+### 2.TEST       
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unit tests
+        run: bash scripts/test-unit.sh
+
+      - name: Contract tests
+        run: bash scripts/test-contract.sh
+  
+### 3.BUILD 
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: echo "sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}:${GITHUB_SHA} .
+
+### 4.SCAN
+  scan:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+### 5.PUSH
+  push:
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GHCR
+        run: echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push image
+        run: |
+          docker push ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+### 6.DEPLOY STAGING
+  deploy-staging:
+    needs: push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to staging
+        run: bash scripts/deploy.sh staging ${{ github.sha }}
+
+### 7.SMOKE TEST
+    smoke-staging:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run smoke tests
+        run: bash scripts/smoke.sh staging
+
+### 8.PRODUCTION (CANARY + FULL)
+  deploy-production:
+    needs: smoke-staging
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Canary deploy (10%)
+        run: bash scripts/deploy.sh production ${{ github.sha }} canary
+
+      - name: Verify canary
+        run: bash scripts/canary-verify.sh
+
+      - name: Full rollout
+        run: bash scripts/deploy.sh production ${{ github.sha }} full

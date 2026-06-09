@@ -1,0 +1,59 @@
+1. FAST ERROR BUDGET BURN (PAGE)
+
+- alert: AvailabilityBurnFast
+  expr: |
+    (
+      sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[1h]))
+      /
+      sum(rate(http_requests_total{job="vision-moderation"}[1h]))
+    ) > (14.4 * (1 - 0.995))
+  for: 5m
+  labels:
+    severity: page
+  annotations:
+    summary: "Fast error budget burn"
+    runbook: "https://runbooks.example.com/availability-burn"
+
+2. SLOW BURN (TICKET)
+
+- alert: AvailabilityBurnSlow
+  expr: |
+    (
+      sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[24h]))
+      /
+      sum(rate(http_requests_total{job="vision-moderation"}[24h]))
+    ) > (6 * (1 - 0.995))
+  for: 30m
+  labels:
+    severity: ticket
+
+3. LATENCY P99
+
+- alert: LatencyP99High
+  expr: |
+    histogram_quantile(0.99,
+      sum(rate(http_request_duration_seconds_bucket{job="vision-moderation"}[5m])) by (le)
+    ) > 1
+  for: 5m
+  labels:
+    severity: page
+
+4. DRIFT (PSI)
+
+- alert: DriftDetected
+  expr: |
+    model_feature_drift_psi > 0.2
+  for: 1h
+  labels:
+    severity: ticket
+
+5. MODEL VERSION MISMATCH
+
+- alert: ModelVersionMismatch
+  expr: |
+    count(
+      (model_version != http_response_header_model_version)
+    ) > 0
+  for: 5m
+  labels:
+    severity: page
