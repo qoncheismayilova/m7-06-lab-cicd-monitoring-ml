@@ -1,59 +1,154 @@
-1. FAST ERROR BUDGET BURN (PAGE)
+---
+# Prometheus AlertManager rules — Vision Moderation service
+# SLO baseline: availability 99.5 % monthly  |  p99 latency ≤ 1 s
+# Error-budget constants (monthly ≈ 43 200 min):
+#   Fast burn multiplier  → 14.4  (2 % budget in 1 h)
+#   Slow burn multiplier  → 6     (10 % budget in 24 h)
 
-- alert: AvailabilityBurnFast
-  expr: |
-    (
-      sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[1h]))
-      /
-      sum(rate(http_requests_total{job="vision-moderation"}[1h]))
-    ) > (14.4 * (1 - 0.995))
-  for: 5m
-  labels:
-    severity: page
-  annotations:
-    summary: "Fast error budget burn"
-    runbook: "https://runbooks.example.com/availability-burn"
+groups:
+  - name: vision-moderation.availability
+    rules:
 
-2. SLOW BURN (TICKET)
+      # ──────────────────────────────────────────────────────────────
+      # 1. Fast burn  — 2 % of monthly error budget consumed in 1 h
+      #    Burn rate > 14.4 × (1 − 0.995) = 14.4 × 0.005 = 0.072
+      #    Backed by both a short (1 h) and long (6 h) window.
+      # ──────────────────────────────────────────────────────────────
+      - alert: AvailabilityBurnFast
+        expr: |
+          (
+            sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[1h]))
+            /
+            sum(rate(http_requests_total{job="vision-moderation"}[1h]))
+          ) > (14.4 * (1 - 0.995))
+          and
+          (
+            sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[6h]))
+            /
+            sum(rate(http_requests_total{job="vision-moderation"}[6h]))
+          ) > (14.4 * (1 - 0.995))
+        for: 5m
+        labels:
+          severity: page
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "Vision Moderation: fast availability burn rate — page immediately"
+          description: >
+            Error rate is burning the monthly availability budget more than
+            14.4× faster than allowed (short window 1 h + long window 6 h).
+            At this rate, 2 % of the monthly budget will be gone within 1 hour.
+          runbook: "https://runbooks.example.com/vision-moderation/availability-burn-fast"
+          dashboard: "https://grafana.example.com/d/vision-mod-slo?var-window=1h"
 
-- alert: AvailabilityBurnSlow
-  expr: |
-    (
-      sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[24h]))
-      /
-      sum(rate(http_requests_total{job="vision-moderation"}[24h]))
-    ) > (6 * (1 - 0.995))
-  for: 30m
-  labels:
-    severity: ticket
+      # ──────────────────────────────────────────────────────────────
+      # 2. Slow burn  — 10 % of monthly error budget consumed in 24 h
+      #    Burn rate > 6 × (1 − 0.995) = 6 × 0.005 = 0.03
+      #    Backed by short (6 h) and long (24 h) windows.
+      # ──────────────────────────────────────────────────────────────
+      - alert: AvailabilityBurnSlow
+        expr: |
+          (
+            sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[6h]))
+            /
+            sum(rate(http_requests_total{job="vision-moderation"}[6h]))
+          ) > (6 * (1 - 0.995))
+          and
+          (
+            sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[24h]))
+            /
+            sum(rate(http_requests_total{job="vision-moderation"}[24h]))
+          ) > (6 * (1 - 0.995))
+        for: 15m
+        labels:
+          severity: ticket
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "Vision Moderation: slow availability burn rate — open ticket"
+          description: >
+            Error rate is burning the monthly availability budget more than
+            6× faster than allowed (short window 6 h + long window 24 h).
+            At this rate, 10 % of the monthly budget will be gone within 24 hours.
+          runbook: "https://runbooks.example.com/vision-moderation/availability-burn-slow"
+          dashboard: "https://grafana.example.com/d/vision-mod-slo?var-window=24h"
 
-3. LATENCY P99
+  - name: vision-moderation.latency
+    rules:
 
-- alert: LatencyP99High
-  expr: |
-    histogram_quantile(0.99,
-      sum(rate(http_request_duration_seconds_bucket{job="vision-moderation"}[5m])) by (le)
-    ) > 1
-  for: 5m
-  labels:
-    severity: page
+      # ──────────────────────────────────────────────────────────────
+      # 3. p99 latency > 1 s sustained for 5 min  → page
+      # ──────────────────────────────────────────────────────────────
+      - alert: LatencyP99High
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (
+              rate(http_request_duration_seconds_bucket{job="vision-moderation"}[5m])
+            )
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: page
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "Vision Moderation: p99 latency above SLO threshold (1 s)"
+          description: >
+            The 99th-percentile request latency has exceeded 1 second for the
+            past 5 minutes, breaching the latency SLO.
+          runbook: "https://runbooks.example.com/vision-moderation/latency-p99-high"
+          dashboard: "https://grafana.example.com/d/vision-mod-latency"
 
-4. DRIFT (PSI)
+  - name: vision-moderation.ml-quality
+    rules:
 
-- alert: DriftDetected
-  expr: |
-    model_feature_drift_psi > 0.2
-  for: 1h
-  labels:
-    severity: ticket
+      # ──────────────────────────────────────────────────────────────
+      # 4. Input-feature drift (PSI) > 0.2 for any major feature,
+      #    sustained 1 h  → ticket
+      # ──────────────────────────────────────────────────────────────
+      - alert: DriftDetected
+        expr: |
+          max by (feature) (
+            model_feature_psi_score{job="vision-moderation"}
+          ) > 0.2
+        for: 1h
+        labels:
+          severity: ticket
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "Vision Moderation: significant input-feature drift detected (PSI > 0.2)"
+          description: >
+            Population Stability Index for at least one input feature has been
+            above 0.2 for the past hour, indicating meaningful distribution
+            shift from the training baseline. Feature: {{ $labels.feature }},
+            current PSI: {{ $value | printf "%.3f" }}.
+          runbook: "https://runbooks.example.com/vision-moderation/drift-detected"
+          dashboard: "https://grafana.example.com/d/vision-mod-drift"
 
-5. MODEL VERSION MISMATCH
-
-- alert: ModelVersionMismatch
-  expr: |
-    count(
-      (model_version != http_response_header_model_version)
-    ) > 0
-  for: 5m
-  labels:
-    severity: page
+      # ──────────────────────────────────────────────────────────────
+      # 5. At least one replica serving a model version that does not
+      #    match the registry's expected version  → page
+      # ──────────────────────────────────────────────────────────────
+      - alert: ModelVersionMismatch
+        expr: |
+          count by (pod, served_version, expected_version) (
+            model_serving_version_mismatch{job="vision-moderation"} == 1
+          ) > 0
+        for: 5m
+        labels:
+          severity: page
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "Vision Moderation: replica serving unexpected model version"
+          description: >
+            One or more replicas have been responding with a model_version
+            header that does not match the version registered in the model
+            registry for more than 5 minutes.
+            Pod: {{ $labels.pod }},
+            expected: {{ $labels.expected_version }},
+            served: {{ $labels.served_version }}.
+          runbook: "https://runbooks.example.com/vision-moderation/model-version-mismatch"
+          dashboard: "https://grafana.example.com/d/vision-mod-versions"
